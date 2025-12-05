@@ -2493,6 +2493,7 @@
 										{mergeResponses}
 										{chatActionHandler}
 										{addMessages}
+										{stopResponse}
 										topPadding={true}
 										bottomPadding={files.length > 0}
 										{onSelect}
