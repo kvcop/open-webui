@@ -1492,6 +1492,190 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if mcp_clients:
         metadata["mcp_clients"] = mcp_clients
 
+    if files:
+        file_tools = {}
+
+        async def retrieve_context_from_files(
+            query: str, file_ids: list[str] = None, **kwargs
+        ):
+            target_files = []
+            if file_ids:
+                target_files = [f for f in files if f.get("id") in file_ids]
+            else:
+                target_files = files
+
+            if not target_files:
+                return "No files found."
+
+            try:
+                # Reuse get_sources_from_items
+                sources = await get_sources_from_items(
+                    request=request,
+                    items=target_files,
+                    queries=[query],
+                    embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                        query, prefix=prefix, user=user
+                    ),
+                    k=request.app.state.config.TOP_K,
+                    reranking_function=(
+                        (
+                            lambda query, documents: request.app.state.RERANKING_FUNCTION(
+                                query, documents, user=user
+                            )
+                        )
+                        if request.app.state.RERANKING_FUNCTION
+                        else None
+                    ),
+                    k_reranker=request.app.state.config.TOP_K_RERANKER,
+                    r=request.app.state.config.RELEVANCE_THRESHOLD,
+                    hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
+                    hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                    full_context=request.app.state.config.RAG_FULL_CONTEXT,
+                    user=user,
+                )
+
+                context_string = ""
+                citation_idx_map = {}
+
+                for source in sources:
+                    if "document" in source:
+                        for document_text, document_metadata in zip(
+                            source["document"], source["metadata"]
+                        ):
+                            source_name = source.get("source", {}).get("name", None)
+                            source_id = (
+                                document_metadata.get("source", None)
+                                or source.get("source", {}).get("id", None)
+                                or "N/A"
+                            )
+
+                            if source_id not in citation_idx_map:
+                                citation_idx_map[source_id] = (
+                                    len(citation_idx_map) + 1
+                                )
+
+                            context_string += (
+                                f'<source id="{citation_idx_map[source_id]}"'
+                                + (f' name="{source_name}"' if source_name else "")
+                                + f">{document_text}</source>\n"
+                            )
+
+                context_string = context_string.strip()
+                return context_string if context_string else "No relevant context found."
+
+            except Exception as e:
+                log.exception(e)
+                return f"Error retrieving context: {e}"
+
+        async def get_file_preview(file_id: str, **kwargs):
+            target_file = next((f for f in files if f.get("id") == file_id), None)
+            if not target_file:
+                return "File not found."
+
+            content = target_file.get("file", {}).get("data", {}).get("content", "")
+            if not content:
+                # Try to fetch from DB if content is missing in metadata
+                from open_webui.models.files import Files
+
+                file_obj = Files.get_file_by_id(file_id)
+                if file_obj:
+                    content = file_obj.data.get("content", "")
+
+            if content:
+                return content[:500] + ("..." if len(content) > 500 else "")
+            else:
+                return "File content not available or empty."
+
+        async def list_files(**kwargs):
+            file_list = []
+            for f in files:
+                file_list.append(
+                    {
+                        "id": f.get("id"),
+                        "name": f.get("name"),
+                        "type": f.get("type"),
+                    }
+                )
+            return json.dumps(file_list, indent=2)
+
+        file_tools["retrieve_context_from_files"] = {
+            "spec": {
+                "name": "retrieve_context_from_files",
+                "description": "Retrieve relevant context from the attached files based on a query. Use this when you need information from the documents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The query to search for in the files.",
+                        },
+                        "file_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional list of file IDs to search in. If not provided, searches all attached files.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            "callable": retrieve_context_from_files,
+        }
+
+        file_tools["get_file_preview"] = {
+            "spec": {
+                "name": "get_file_preview",
+                "description": "Get a short preview (first 500 characters) of a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {
+                            "type": "string",
+                            "description": "The ID of the file to preview.",
+                        }
+                    },
+                    "required": ["file_id"],
+                },
+            },
+            "callable": get_file_preview,
+        }
+
+        file_tools["list_files"] = {
+            "spec": {
+                "name": "list_files",
+                "description": "Get a list of attached files with their IDs and names.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+            "callable": list_files,
+        }
+
+        tools_dict.update(file_tools)
+
+        # Inject descriptions to system prompt
+        tool_descriptions = []
+        for tool_name, tool_info in file_tools.items():
+            spec = tool_info["spec"]
+            tool_descriptions.append(f"- {tool_name}: {spec['description']}")
+
+        files_info = "\n".join(
+            [f"- {f.get('name')} (ID: {f.get('id')})" for f in files]
+        )
+        system_prompt_addition = (
+            f"\n\nFiles are attached to this conversation:\n{files_info}\n\n"
+            f"You have access to the following tools to interact with these files:\n"
+            + "\n".join(tool_descriptions)
+            + "\n\nUse 'retrieve_context_from_files' to search for information within the documents."
+            + "\nUse 'get_file_preview' to see the beginning of a file."
+            + "\nUse 'list_files' to list available files."
+        )
+
+        form_data["messages"] = add_or_update_system_message(
+            system_prompt_addition, form_data.get("messages", []), append=True
+        )
+
     if tools_dict:
         if metadata.get("params", {}).get("function_calling") == "native":
             # If the function calling is native, then call the tools function calling handler
@@ -1510,13 +1694,30 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             except Exception as e:
                 log.exception(e)
 
+    original_files = form_data.get("metadata", {}).get("files", [])
     try:
-        form_data, flags = await chat_completion_files_handler(
-            request, form_data, extra_params, user
-        )
-        sources.extend(flags.get("sources", []))
+        # Filter files for automatic RAG: only process web_search or collection types automatically.
+        # User uploaded files (type="file") should be handled by tools.
+        auto_rag_files = []
+        if files:
+            for f in files:
+                if f.get("type") in ["web_search", "collection"]:
+                    auto_rag_files.append(f)
+
+        if auto_rag_files:
+            form_data["metadata"]["files"] = auto_rag_files
+
+            form_data, flags = await chat_completion_files_handler(
+                request, form_data, extra_params, user
+            )
+            sources.extend(flags.get("sources", []))
+
     except Exception as e:
         log.exception(e)
+    finally:
+        # Restore original files
+        if original_files:
+            form_data["metadata"]["files"] = original_files
 
     # If context is not empty, insert it into the messages
     if len(sources) > 0:
