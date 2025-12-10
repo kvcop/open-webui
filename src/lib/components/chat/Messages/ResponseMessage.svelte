@@ -139,12 +139,14 @@
 	export let rateMessage: Function;
 	export let actionMessage: Function;
 	export let deleteMessage: Function;
+	export let saveMessage: Function;
 
 	export let submitMessage: Function;
 	export let continueResponse: Function;
 	export let regenerateResponse: Function;
 
 	export let addMessages: Function;
+	export let stopResponse: Function;
 
 	export let isLastMessage = true;
 	export let readOnly = false;
@@ -663,6 +665,26 @@
 					<div>
 						{#if model?.info?.meta?.capabilities?.status_updates ?? true}
 							<StatusHistory statusHistory={message?.statusHistory} />
+						{/if}
+
+						{#if !message.done && (message?.content ?? '').includes('<think>') && !(message?.content ?? '').includes('</think>')}
+							<div class="flex items-center gap-2 mb-2">
+								<button
+									class="px-3 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 dark:text-gray-200 border border-gray-100 dark:border-gray-700 rounded-full transition text-xs font-medium"
+									on:click={async () => {
+										await stopResponse();
+										const updatedContent = message.content + '\n</think>\n';
+										await saveMessage(message.id, {
+											...message,
+											content: updatedContent,
+											done: true
+										});
+										await continueResponse();
+									}}
+								>
+									{$i18n.t('Answer Now')}
+								</button>
+							</div>
 						{/if}
 
 						{#if message?.files && message.files?.filter((f) => f.type === 'image').length > 0}
