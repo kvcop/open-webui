@@ -8,7 +8,7 @@ import {
 	prosemirrorJSONToYDoc
 } from 'y-prosemirror';
 import type { Socket } from 'socket.io-client';
-import type { Awareness } from 'y-protocols/awareness';
+import { Awareness } from 'y-protocols/awareness';
 import type { SessionUser } from '$lib/stores';
 import { Editor, Extension } from '@tiptap/core';
 import { keymap } from 'prosemirror-keymap';

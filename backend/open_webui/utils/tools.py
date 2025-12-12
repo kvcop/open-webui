@@ -197,6 +197,26 @@ async def get_tools(
                             for key, value in connection_headers.items():
                                 headers[key] = value
 
+                        # Add custom headers for Jira and Confluence
+                        user_settings_ui = {}
+                        if user.settings and user.settings.ui:
+                            user_settings_ui = user.settings.ui
+
+                        if "jira" in server_id.lower() or "jira" in function_name.lower():
+                            jira_token = user_settings_ui.get("jiraToken")
+                            if jira_token:
+                                headers["Authorization-jira"] = f"Token {jira_token}"
+
+                        if (
+                            "confluence" in server_id.lower()
+                            or "confluence" in function_name.lower()
+                        ):
+                            confluence_token = user_settings_ui.get("confluenceToken")
+                            if confluence_token:
+                                headers["Authorization-confluence"] = (
+                                    f"Token {confluence_token}"
+                                )
+
                         def make_tool_function(
                             function_name, tool_server_data, headers
                         ):
