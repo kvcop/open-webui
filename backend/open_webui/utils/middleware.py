@@ -3019,10 +3019,122 @@ async def process_chat_response(
 
                 tool_call_retries = 0
 
-                while (
-                    len(tool_calls) > 0
-                    and tool_call_retries < CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES
-                ):
+                async def check_continuation(request, form_data, user, model_id):
+                    # Create a copy of form_data to avoid modifying the original request
+                    check_form_data = form_data.copy()
+
+                    # Prepare the prompt
+                    prompt = (
+                        "Review the conversation history and the latest response. "
+                        "Decide if the response is complete or if you need to generate more content "
+                        "or call tools to fully answer the user's request. "
+                        "Do not output anything else.\n/nothink"
+                    )
+
+                    # Add the prompt to messages
+                    check_form_data["messages"] = [
+                        *form_data["messages"],
+                        {"role": "user", "content": prompt},
+                    ]
+
+                    # Force non-streaming
+                    check_form_data["stream"] = False
+
+                    # Enable structured output
+                    check_form_data["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "continuation_decision",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "decision": {
+                                        "type": "string",
+                                        "enum": ["MORE", "ENOUGH"],
+                                    }
+                                },
+                                "required": ["decision"],
+                                "additionalProperties": False,
+                            },
+                            "strict": True,
+                        },
+                    }
+
+                    try:
+                        res = await generate_chat_completion(
+                            request, check_form_data, user
+                        )
+                        content = ""
+                        if isinstance(res, dict):
+                            choices = res.get("choices", [])
+                            if choices:
+                                content = (
+                                    choices[0]
+                                    .get("message", {})
+                                    .get("content", "")
+                                    .strip()
+                                )
+
+                        log.info(f"Continuation check result: {content}")
+
+                        try:
+                            result = json.loads(content)
+                            return result.get("decision") == "MORE"
+                        except json.JSONDecodeError:
+                            # Fallback if the model ignores structured output or returns invalid JSON
+                            return content.strip().upper() == "MORE"
+
+                    except Exception as e:
+                        log.error(f"Continuation check failed: {e}")
+                        return False
+
+                while tool_call_retries < CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES:
+                    if len(tool_calls) == 0:
+                        # Check if we should continue
+                        current_messages = [
+                            *form_data["messages"],
+                            *convert_content_blocks_to_messages(content_blocks, True),
+                        ]
+
+                        temp_form_data = {
+                            **form_data,
+                            "model": model_id,
+                            "messages": current_messages,
+                        }
+
+                        should_continue = await check_continuation(
+                            request, temp_form_data, user, model_id
+                        )
+
+                        if not should_continue:
+                            break
+
+                        # If we continue, we proceed to generate again WITHOUT executing tools
+                        tool_call_retries += 1
+
+                        try:
+                            new_form_data = {
+                                **form_data,
+                                "model": model_id,
+                                "stream": True,
+                                "messages": current_messages,
+                            }
+
+                            res = await generate_chat_completion(
+                                request,
+                                new_form_data,
+                                user,
+                            )
+
+                            if isinstance(res, StreamingResponse):
+                                await stream_body_handler(res, new_form_data)
+                            else:
+                                break
+                        except Exception as e:
+                            log.debug(e)
+                            break
+
+                        continue
 
                     tool_call_retries += 1
 
