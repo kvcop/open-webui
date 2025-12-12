@@ -3028,8 +3028,7 @@ async def process_chat_response(
                         "Review the conversation history and the latest response. "
                         "Decide if the response is complete or if you need to generate more content "
                         "or call tools to fully answer the user's request. "
-                        "Answer only 'MORE' if you need to continue, or 'ENOUGH' if the answer is complete. "
-                        "Do not output anything else."
+                        "Do not output anything else.\n/nothink"
                     )
 
                     # Add the prompt to messages
@@ -3041,18 +3040,50 @@ async def process_chat_response(
                     # Force non-streaming
                     check_form_data["stream"] = False
 
+                    # Enable structured output
+                    check_form_data["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "continuation_decision",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "decision": {
+                                        "type": "string",
+                                        "enum": ["MORE", "ENOUGH"],
+                                    }
+                                },
+                                "required": ["decision"],
+                                "additionalProperties": False,
+                            },
+                            "strict": True,
+                        },
+                    }
+
                     try:
-                        res = await generate_chat_completion(request, check_form_data, user)
+                        res = await generate_chat_completion(
+                            request, check_form_data, user
+                        )
                         content = ""
                         if isinstance(res, dict):
                             choices = res.get("choices", [])
                             if choices:
                                 content = (
-                                    choices[0].get("message", {}).get("content", "").strip()
+                                    choices[0]
+                                    .get("message", {})
+                                    .get("content", "")
+                                    .strip()
                                 )
 
                         log.info(f"Continuation check result: {content}")
-                        return content.upper() == "MORE"
+
+                        try:
+                            result = json.loads(content)
+                            return result.get("decision") == "MORE"
+                        except json.JSONDecodeError:
+                            # Fallback if the model ignores structured output or returns invalid JSON
+                            return content.strip().upper() == "MORE"
+
                     except Exception as e:
                         log.error(f"Continuation check failed: {e}")
                         return False
